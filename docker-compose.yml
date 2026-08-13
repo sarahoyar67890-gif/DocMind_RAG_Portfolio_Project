@@ -1,0 +1,45 @@
+services:
+  backend:
+    build: ./backend
+    container_name: docmind-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - LLM_TEMPERATURE=${LLM_TEMPERATURE:-0.1}
+      - LLM_MAX_TOKENS=${LLM_MAX_TOKENS:-800}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+      - CHUNK_SIZE=${CHUNK_SIZE:-800}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-150}
+      - RETRIEVAL_TOP_K=${RETRIEVAL_TOP_K:-4}
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-30}
+      - CHROMA_PERSIST_DIR=/app/chroma_data
+      - REGISTRY_PATH=/app/app/data/document_registry.json
+    volumes:
+      - chroma_data:/app/chroma_data
+      - registry_data:/app/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build: ./frontend
+    container_name: docmind-frontend
+    ports:
+      - "8501:8501"
+    environment:
+      # Inside the Docker network, the frontend must reach the backend by its
+      # SERVICE NAME ("backend"), not localhost — Compose gives each service
+      # its own network namespace, so localhost inside frontend means the
+      # frontend container itself, not the backend container.
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  chroma_data:
+  registry_data:
