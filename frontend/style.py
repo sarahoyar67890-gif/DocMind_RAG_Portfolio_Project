@@ -207,21 +207,13 @@ p, span, div, label, li { color: var(--ink); }
   box-shadow: var(--shadow-card);
   padding: 34px 30px;
 }
-.doc-line { height: 9px; border-radius: 5px; background: rgba(255,255,255,0.09); margin-bottom: 13px; position: relative; }
-.doc-line.w1 { width: 92%; } .doc-line.w2 { width: 78%; } .doc-line.w3 { width: 85%; }
-.doc-line.w4 { width: 60%; } .doc-line.w5 { width: 88%; } .doc-line.w6 { width: 70%; }
-.doc-highlight {
-  position: absolute; left: -6px; right: -6px; top: -3px; bottom: -3px;
-  border-radius: 6px; background: var(--accent-gradient); opacity: 0;
-  box-shadow: 0 0 16px 1px rgba(139,124,255,0.55);
-  animation: sweep-highlight 4.8s ease-in-out infinite;
+.doc-icon-wrap {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; min-height: 220px;
 }
-.doc-line.w2 .doc-highlight { animation-delay: 0.9s; }
-.doc-line.w5 .doc-highlight { animation-delay: 2.1s; }
-@keyframes sweep-highlight {
-  0%, 100% { opacity: 0; }
-  6%, 22% { opacity: 0.9; }
-  30% { opacity: 0; }
+.doc-icon-wrap svg {
+  width: 130px; height: 130px;
+  filter: drop-shadow(0 12px 28px rgba(139,124,255,0.35));
 }
 .doc-citation-pin {
   position: absolute; top: 26px; right: 26px;
