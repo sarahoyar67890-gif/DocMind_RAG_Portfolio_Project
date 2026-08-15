@@ -10,7 +10,12 @@ Run standalone:
 (with the backend already running — see README)
 """
 
+import os
 import streamlit as st
+
+if "BACKEND_URL" in st.secrets:
+    os.environ["BACKEND_URL"] = st.secrets["BACKEND_URL"]
+
 import style
 import api_client
 from api_client import APIError
