@@ -10,12 +10,7 @@ Run standalone:
 (with the backend already running — see README)
 """
 
-import os
 import streamlit as st
-
-if "BACKEND_URL" in st.secrets:
-    os.environ["BACKEND_URL"] = st.secrets["BACKEND_URL"]
-
 import style
 import api_client
 from api_client import APIError
@@ -103,13 +98,19 @@ st.markdown(
       <div class="doc-panel-wrap">
         <div class="doc-panel">
           <div class="doc-citation-pin">Page 14</div>
-          <div class="doc-line w1"><div class="doc-highlight"></div></div>
-          <div class="doc-line w2"><div class="doc-highlight"></div></div>
-          <div class="doc-line w3"></div>
-          <div class="doc-line w4"></div>
-          <div class="doc-line w5"><div class="doc-highlight"></div></div>
-          <div class="doc-line w6"></div>
-          <div class="doc-line w1" style="width:45%;"></div>
+          <div class="doc-icon-wrap">
+            <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M16 6h24l12 12v40a2 2 0 0 1-2 2H16a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2Z" fill="url(#docGrad)" opacity="0.9"/>
+              <path d="M40 6v10a2 2 0 0 0 2 2h10" stroke="rgba(255,255,255,0.5)" stroke-width="1.5"/>
+              <circle cx="40" cy="42" r="13" fill="rgba(20,18,40,0.85)" stroke="var(--accent-2)" stroke-width="2"/>
+              <path d="M35 42l3.5 3.5L46 38" stroke="var(--accent-2)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+              <defs>
+                <linearGradient id="docGrad" x1="10" y1="6" x2="52" y2="60" gradientUnits="userSpaceOnUse">
+                  <stop stop-color="#8B7CFF"/><stop offset="1" stop-color="#4FD1E8"/>
+                </linearGradient>
+              </defs>
+            </svg>
+          </div>
           <div class="doc-footer-tag">Retrieval&nbsp;<b>Semantic</b>&nbsp;·&nbsp;Grounding&nbsp;<b>Page-cited</b></div>
         </div>
       </div>
