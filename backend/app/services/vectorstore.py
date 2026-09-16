@@ -1,11 +1,10 @@
 """
 app/services/vectorstore.py — ChromaDB wrapper for chunk storage + retrieval.
 
-Single collection, every chunk tagged with `document_id` metadata. This is
-what lets one active document work correctly today while keeping the door
-open for multi-document support later (query with a different `document_id`
-filter, or drop the filter to search across everything) — without a schema
-change.
+Single collection, every chunk tagged with `document_id` metadata. Retrieval
+can be scoped to a specific set of document_ids (multi-document RAG with
+document filtering) or left unscoped to search across every indexed
+document — the schema doesn't need to change either way.
 """
 
 import logging
@@ -22,6 +21,7 @@ log = logging.getLogger(__name__)
 @dataclass
 class RetrievedChunk:
     chunk_id: str
+    document_id: str
     document_name: str
     page_number: int
     text: str
@@ -63,12 +63,30 @@ class VectorStore:
         )
         log.info("Indexed %d chunks into vector store", len(chunks))
 
-    def query(self, query_embedding, document_id: str, top_k: int) -> list[RetrievedChunk]:
-        result = self._collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=top_k,
-            where={"document_id": document_id},
-        )
+    def query(
+        self,
+        query_embedding,
+        document_ids: list[str] | None,
+        top_k: int,
+    ) -> list[RetrievedChunk]:
+        """Dense similarity search. `document_ids`:
+          - a non-empty list  -> restricted to exactly those documents (the
+            normal multi-document-with-selection case; prevents any other
+            document's chunks from leaking in).
+          - None or []        -> unfiltered, searches every indexed document.
+        """
+        query_kwargs = {
+            "query_embeddings": [query_embedding.tolist()],
+            "n_results": top_k,
+        }
+        if document_ids:
+            query_kwargs["where"] = (
+                {"document_id": document_ids[0]}
+                if len(document_ids) == 1
+                else {"document_id": {"$in": document_ids}}
+            )
+
+        result = self._collection.query(**query_kwargs)
         if not result["ids"] or not result["ids"][0]:
             return []
 
@@ -79,6 +97,7 @@ class VectorStore:
             similarity = max(0.0, 1.0 - distance)
             retrieved.append(RetrievedChunk(
                 chunk_id=result["ids"][0][i],
+                document_id=metadata["document_id"],
                 document_name=metadata["document_name"],
                 page_number=metadata["page_number"],
                 text=result["documents"][0][i],
@@ -105,7 +124,7 @@ class VectorStore:
 
         return [
             RetrievedChunk(
-                chunk_id=cid, document_name=meta["document_name"],
+                chunk_id=cid, document_id=meta["document_id"], document_name=meta["document_name"],
                 page_number=meta["page_number"], text=text, similarity=0.0,
             )
             for cid, text, meta in sampled
