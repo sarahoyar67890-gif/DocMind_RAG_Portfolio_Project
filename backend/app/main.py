@@ -14,8 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.logging_config import configure_logging
 from app.schemas import (
-    UploadResponse, ActiveDocumentResponse, QueryRequest, QueryResponse,
-    InsightsResponse, HealthResponse,
+    UploadResponse, DocumentListResponse, SelectDocumentsRequest,
+    InsightsRequest, QueryRequest, QueryResponse, InsightsResponse, HealthResponse,
 )
 from app.services.document_manager import DocumentManager
 from app.services.pdf_processor import PDFProcessingError
@@ -31,7 +31,7 @@ settings = get_settings()
 app = FastAPI(
     title="DocMind API",
     description="RAG-powered document Q&A backend — retrieval, grounded generation, citations.",
-    version="1.0.0",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -55,11 +55,14 @@ rag_pipeline = RAGPipeline(vector_store, llm_service, settings.embedding_model)
 
 @app.get("/health", response_model=HealthResponse)
 def health():
-    active = doc_manager.get_active_document()
+    docs = doc_manager.list_documents()
+    selected_ids = set(doc_manager.get_selected_document_ids())
+    selected_names = [d.filename for d in docs if d.document_id in selected_ids]
     return HealthResponse(
         status="ok",
         groq_configured=llm_service.is_configured(),
-        active_document=active.filename if active else None,
+        documents_indexed=len(docs),
+        selected_documents=selected_names,
     )
 
 
@@ -81,7 +84,7 @@ async def upload_document(file: UploadFile = File(...)):
         status, steps = doc_manager.process_upload(file_bytes, file.filename)
     except PDFProcessingError as e:
         raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
+    except Exception:
         log.exception("Unexpected error processing upload '%s'", file.filename)
         raise HTTPException(status_code=500, detail="Something went wrong while processing this document.")
 
@@ -89,36 +92,48 @@ async def upload_document(file: UploadFile = File(...)):
     return UploadResponse(document=status, message=message)
 
 
-@app.get("/documents/active", response_model=ActiveDocumentResponse)
-def get_active_document():
-    return ActiveDocumentResponse(document=doc_manager.get_active_document())
+@app.get("/documents", response_model=DocumentListResponse)
+def list_documents():
+    docs = doc_manager.list_documents()
+    selected = doc_manager.get_selected_document_ids()
+    return DocumentListResponse(documents=docs, selected_document_ids=selected)
 
 
-@app.post("/documents/clear")
-def clear_document():
-    doc_manager.clear_active_document()
-    return {"message": "Active document cleared."}
+@app.post("/documents/select", response_model=DocumentListResponse)
+def select_documents(request: SelectDocumentsRequest):
+    docs = doc_manager.set_selected_documents(request.document_ids)
+    selected = doc_manager.get_selected_document_ids()
+    return DocumentListResponse(documents=docs, selected_document_ids=selected)
+
+
+@app.delete("/documents/{document_id}")
+def delete_document(document_id: str):
+    doc = doc_manager.get_document(document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    doc_manager.remove_document(document_id)
+    return {"message": f"Removed '{doc.filename}'."}
 
 
 @app.post("/documents/insights", response_model=InsightsResponse)
-def document_insights():
-    active = doc_manager.get_active_document()
-    if not active:
-        raise HTTPException(status_code=400, detail="No active document. Upload a PDF first.")
+def document_insights(request: InsightsRequest):
+    doc = doc_manager.get_document(request.document_id)
+    if not doc:
+        raise HTTPException(status_code=400, detail="That document was not found. Upload it first.")
     if not llm_service.is_configured():
         raise HTTPException(status_code=503, detail="GROQ_API_KEY is not configured on the backend.")
 
-    samples = vector_store.get_sample_chunks(active.document_id, max_samples=6)
+    samples = vector_store.get_sample_chunks(doc.document_id, max_samples=6)
     if not samples:
-        raise HTTPException(status_code=500, detail="No indexed content found for the active document.")
+        raise HTTPException(status_code=500, detail="No indexed content found for this document.")
 
     try:
-        overview = llm_service.generate_overview(active.filename, samples)
+        overview = llm_service.generate_overview(doc.filename, samples)
     except LLMServiceError as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     return InsightsResponse(
-        document_id=active.document_id,
+        document_id=doc.document_id,
         overview=overview,
         sample_pages_used=sorted({c.page_number for c in samples}),
     )
@@ -126,17 +141,37 @@ def document_insights():
 
 @app.post("/query", response_model=QueryResponse)
 def query_document(request: QueryRequest):
-    active = doc_manager.get_active_document()
-    if not active:
-        raise HTTPException(status_code=400, detail="No active document. Upload a PDF first.")
+    requested_ids = request.document_ids if request.document_ids else doc_manager.get_selected_document_ids()
+    if not requested_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="No documents selected. Upload a PDF and select at least one document.",
+        )
+
+    docs = [doc_manager.get_document(doc_id) for doc_id in requested_ids]
+    docs = [d for d in docs if d is not None]
+    if not docs:
+        raise HTTPException(
+            status_code=400,
+            detail="The selected documents are no longer available. Refresh your document list.",
+        )
+
     if not llm_service.is_configured():
         raise HTTPException(status_code=503, detail="GROQ_API_KEY is not configured on the backend.")
 
     top_k = request.top_k or settings.retrieval_top_k
+    document_ids = [d.document_id for d in docs]
+    document_names = [d.filename for d in docs]
+
     try:
-        return rag_pipeline.answer(request.question, document_id=active.document_id, top_k=top_k)
+        return rag_pipeline.answer(
+            request.question,
+            document_ids=document_ids,
+            document_names=document_names,
+            top_k=top_k,
+        )
     except LLMServiceError as e:
         raise HTTPException(status_code=502, detail=str(e))
-    except Exception as e:
+    except Exception:
         log.exception("Unexpected error answering query")
         raise HTTPException(status_code=500, detail="Something went wrong while answering this question.")
