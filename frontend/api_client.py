@@ -48,25 +48,41 @@ def upload_document(file_bytes: bytes, filename: str) -> dict:
         raise APIError("Document processing timed out. Try a smaller file.")
 
 
-def get_active_document() -> dict:
+def list_documents() -> dict:
     try:
-        resp = requests.get(f"{BACKEND_URL}/documents/active", timeout=15)
+        resp = requests.get(f"{BACKEND_URL}/documents", timeout=15)
         return _handle_response(resp)
     except requests.exceptions.ConnectionError:
         raise APIError(f"Can't reach the backend at {BACKEND_URL}. Is it running?")
 
 
-def clear_document() -> dict:
+def select_documents(document_ids: list[str]) -> dict:
     try:
-        resp = requests.post(f"{BACKEND_URL}/documents/clear", timeout=15)
+        resp = requests.post(
+            f"{BACKEND_URL}/documents/select",
+            json={"document_ids": document_ids},
+            timeout=15,
+        )
         return _handle_response(resp)
     except requests.exceptions.ConnectionError:
         raise APIError(f"Can't reach the backend at {BACKEND_URL}. Is it running?")
 
 
-def get_insights() -> dict:
+def delete_document(document_id: str) -> dict:
     try:
-        resp = requests.post(f"{BACKEND_URL}/documents/insights", timeout=REQUEST_TIMEOUT)
+        resp = requests.delete(f"{BACKEND_URL}/documents/{document_id}", timeout=15)
+        return _handle_response(resp)
+    except requests.exceptions.ConnectionError:
+        raise APIError(f"Can't reach the backend at {BACKEND_URL}. Is it running?")
+
+
+def get_insights(document_id: str) -> dict:
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/documents/insights",
+            json={"document_id": document_id},
+            timeout=REQUEST_TIMEOUT,
+        )
         return _handle_response(resp)
     except requests.exceptions.ConnectionError:
         raise APIError(f"Can't reach the backend at {BACKEND_URL}. Is it running?")
@@ -74,9 +90,11 @@ def get_insights() -> dict:
         raise APIError("Generating the document overview timed out.")
 
 
-def ask_question(question: str, top_k: int = None) -> dict:
+def ask_question(question: str, document_ids: list[str] = None, top_k: int = None) -> dict:
     try:
         payload = {"question": question}
+        if document_ids:
+            payload["document_ids"] = document_ids
         if top_k:
             payload["top_k"] = top_k
         resp = requests.post(f"{BACKEND_URL}/query", json=payload, timeout=REQUEST_TIMEOUT)
