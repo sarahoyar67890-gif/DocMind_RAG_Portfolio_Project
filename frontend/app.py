@@ -27,21 +27,25 @@ style.inject(st)
 # Session state
 # ---------------------------------------------------------------------------
 if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []  # list of {question, answer, grounded, sources}
-if "active_document" not in st.session_state:
-    st.session_state.active_document = None
+    st.session_state.chat_history = []  # list of {question, answer, grounded, sources, documents_searched}
+if "documents" not in st.session_state:
+    st.session_state.documents = []  # list of document dicts from /documents
+if "selected_ids" not in st.session_state:
+    st.session_state.selected_ids = []
 if "insights" not in st.session_state:
-    st.session_state.insights = None
+    st.session_state.insights = {}  # document_id -> insights dict
 if "backend_status" not in st.session_state:
     st.session_state.backend_status = None
 
 
-def refresh_active_document():
+def refresh_documents():
     try:
-        result = api_client.get_active_document()
-        st.session_state.active_document = result.get("document")
+        result = api_client.list_documents()
+        st.session_state.documents = result.get("documents", [])
+        st.session_state.selected_ids = result.get("selected_document_ids", [])
     except APIError:
-        st.session_state.active_document = None
+        st.session_state.documents = []
+        st.session_state.selected_ids = []
 
 
 def refresh_backend_status():
@@ -53,8 +57,8 @@ def refresh_backend_status():
 
 if st.session_state.backend_status is None:
     refresh_backend_status()
-if st.session_state.active_document is None:
-    refresh_active_document()
+if not st.session_state.documents:
+    refresh_documents()
 
 backend_ok = st.session_state.backend_status and "error" not in st.session_state.backend_status
 groq_configured = backend_ok and st.session_state.backend_status.get("groq_configured", False)
@@ -87,8 +91,8 @@ st.markdown(
         <span class="eyebrow">RAG-Powered Document Intelligence</span>
         <h1>Ask your documents<br>anything.</h1>
         <p class="dm-sub">
-          Upload a PDF and get grounded answers with page-level source citations —
-          drawn only from what's actually in the document, never invented.
+          Upload one or more PDFs and get grounded answers with page-level source citations —
+          drawn only from what's actually in the documents, never invented.
         </p>
         <div class="dm-note">
           Answers are generated from retrieved passages, not general knowledge.
@@ -169,11 +173,11 @@ st.markdown(
 )
 
 steps = [
-    ("01", "Upload", "Drop in a PDF — DocMind extracts text while preserving page numbers."),
+    ("01", "Upload", "Drop in one or more PDFs — DocMind extracts text while preserving page numbers."),
     ("02", "Chunk & embed", "Text is split into meaningful passages and converted to vectors."),
     ("03", "Index", "Chunks and their page metadata are stored in a vector database."),
-    ("04", "Ask", "Your question is embedded and matched against the indexed passages."),
-    ("05", "Retrieve", "The most relevant chunks are pulled — not the whole document."),
+    ("04", "Select & ask", "Choose which documents are in scope, then ask your question."),
+    ("05", "Retrieve", "The most relevant chunks are pulled from the selected documents."),
     ("06", "Answer + cite", "An LLM answers using only that context, with page citations."),
 ]
 step_html = '<div class="step-grid">'
@@ -189,160 +193,163 @@ st.markdown('<hr class="hairline">', unsafe_allow_html=True)
 # Document upload / management
 # ---------------------------------------------------------------------------
 st.markdown(
-    '<div class="section-head fade-in"><span class="eyebrow">Document</span>'
-    '<h3>Upload a document</h3></div>',
+    '<div class="section-head fade-in"><span class="eyebrow">Documents</span>'
+    '<h3>Upload documents</h3></div>',
     unsafe_allow_html=True,
 )
 
-active_doc = st.session_state.active_document
-
-if active_doc:
-    size_kb = active_doc["file_size_bytes"] / 1024
-    st.markdown(
-        f"""
-        <div class="dm-card fade-in">
-          <div class="doc-status-row">
-            <div class="doc-status-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                <path d="M14 2v6h6"></path><path d="m9 15 2 2 4-4"></path>
-              </svg>
-            </div>
-            <div style="flex:1; min-width:0;">
-              <span class="eyebrow" style="color:var(--green);">Active document</span>
-              <div class="doc-status-name">{active_doc['filename']}</div>
-            </div>
-          </div>
-          <div class="spec-grid">
-            <div class="spec-item"><div class="spec-key">Pages</div><div class="spec-val">{active_doc['num_pages']}</div></div>
-            <div class="spec-item"><div class="spec-key">Chunks indexed</div><div class="spec-val">{active_doc['num_chunks']}</div></div>
-            <div class="spec-item"><div class="spec-key">File size</div><div class="spec-val">{size_kb:.0f} KB</div></div>
-          </div>
-        </div>
-        """,
+st.markdown(
+    """
+    <div class="upload-hint fade-in">
+      <div class="upload-hint-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+          <path d="M12 12v9"></path><path d="m16 16-4-4-4 4"></path>
+        </svg>
+      </div>
+      <div>
+        <p class="upload-hint-title">Drag &amp; drop PDF(s) here</p>
+        <p class="upload-hint-sub">or click below to browse — text-based PDF documents only, multiple files supported</p>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+uploaded_files = st.file_uploader(
+    "Drop your PDFs here — supported: PDF documents",
+    type=["pdf"],
+    accept_multiple_files=True,
+    label_visibility="collapsed",
+    disabled=not backend_ok,
+    key="uploader",
+)
+if uploaded_files:
+    checklist_placeholder = st.empty()
+    checklist_placeholder.markdown(
+        f"<div class='dm-card'><div class='proc-item'><span class='proc-check'>·</span> "
+        f"Processing {len(uploaded_files)} file(s)…</div></div>",
         unsafe_allow_html=True,
     )
+    errors = []
+    for f in uploaded_files:
+        try:
+            api_client.upload_document(f.read(), f.name)
+        except APIError as e:
+            errors.append(f"{f.name}: {e}")
+    checklist_placeholder.empty()
+    if errors:
+        for err in errors:
+            st.error(err)
+    refresh_documents()
+    st.session_state.chat_history = []
+    st.rerun()
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        if st.button("↺  Clear document", use_container_width=True):
-            try:
-                api_client.clear_document()
-                st.session_state.active_document = None
-                st.session_state.chat_history = []
-                st.session_state.insights = None
-                st.rerun()
-            except APIError as e:
-                st.error(str(e))
-    with col2:
-        if st.button("✦  Document insights", use_container_width=True, disabled=not groq_configured):
-            with st.spinner("Reading the document..."):
+st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
+
+docs = st.session_state.documents
+if docs:
+    st.markdown('<span class="eyebrow">Your documents</span>', unsafe_allow_html=True)
+    st.markdown("<div style='height:0.5rem;'></div>", unsafe_allow_html=True)
+
+    doc_options = {d["document_id"]: f"{d['filename']} · {d['num_pages']}p · {d['num_chunks']} chunks" for d in docs}
+    valid_selected = [i for i in st.session_state.selected_ids if i in doc_options]
+    chosen = st.multiselect(
+        "Documents to search",
+        options=list(doc_options.keys()),
+        default=valid_selected,
+        format_func=lambda doc_id: doc_options[doc_id],
+    )
+    if set(chosen) != set(valid_selected):
+        try:
+            result = api_client.select_documents(chosen)
+            st.session_state.documents = result.get("documents", [])
+            st.session_state.selected_ids = result.get("selected_document_ids", [])
+            st.rerun()
+        except APIError as e:
+            st.error(str(e))
+
+    for d in docs:
+        size_kb = d["file_size_bytes"] / 1024
+        selected_badge = "In search scope" if d["document_id"] in st.session_state.selected_ids else "Not selected"
+        badge_class = "badge-grounded" if d["document_id"] in st.session_state.selected_ids else "badge-ungrounded"
+        col1, col2, col3 = st.columns([5, 2, 1])
+        with col1:
+            st.markdown(
+                f"""<div class="doc-status-name" style="font-size:0.92rem;">{d['filename']}</div>
+                <span class="mono" style="font-size:0.72rem; color:var(--ink-muted);">
+                  {d['num_pages']}p · {d['num_chunks']} chunks · {size_kb:.0f} KB
+                </span>""",
+                unsafe_allow_html=True,
+            )
+        with col2:
+            st.markdown(
+                f'<span class="grounded-badge {badge_class}" style="margin-top:0.3rem; display:inline-block;">{selected_badge}</span>',
+                unsafe_allow_html=True,
+            )
+        with col3:
+            if st.button("✕", key=f"del_{d['document_id']}", help=f"Remove {d['filename']}"):
                 try:
-                    st.session_state.insights = api_client.get_insights()
+                    api_client.delete_document(d["document_id"])
+                    st.session_state.insights.pop(d["document_id"], None)
+                    refresh_documents()
+                    st.rerun()
                 except APIError as e:
                     st.error(str(e))
+        st.markdown("<hr class='hairline' style='margin:0.5rem 0;'>", unsafe_allow_html=True)
 
-    if st.session_state.insights:
-        pages_used = ", ".join(str(p) for p in st.session_state.insights["sample_pages_used"])
+    insight_doc_id = st.selectbox(
+        "Document insights for:",
+        options=[d["document_id"] for d in docs],
+        format_func=lambda doc_id: doc_options[doc_id],
+        key="insight_doc_select",
+    )
+    if st.button("✦  Document insights", disabled=not groq_configured):
+        with st.spinner("Reading the document..."):
+            try:
+                st.session_state.insights[insight_doc_id] = api_client.get_insights(insight_doc_id)
+            except APIError as e:
+                st.error(str(e))
+
+    active_insight = st.session_state.insights.get(insight_doc_id)
+    if active_insight:
+        pages_used = ", ".join(str(p) for p in active_insight["sample_pages_used"])
         st.markdown(
             f"""
             <div class="dm-card dm-card-tight dm-card-accent fade-in" style="margin-top:1rem;">
               <span class="eyebrow">Document insights</span>
-              <p style="margin:0.65rem 0 0.5rem 0; font-size:0.93rem; line-height:1.6; overflow-wrap:break-word;">{st.session_state.insights['overview']}</p>
+              <p style="margin:0.65rem 0 0.5rem 0; font-size:0.93rem; line-height:1.6; overflow-wrap:break-word;">{active_insight['overview']}</p>
               <span class="mono" style="font-size:0.72rem; color:var(--ink-muted);">Based on sampled pages: {pages_used}</span>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
-    st.markdown("<div style='height:0.6rem;'></div>", unsafe_allow_html=True)
-    with st.expander("Upload a different document"):
-        replace_file = st.file_uploader("Replace document", type=["pdf"], label_visibility="collapsed", key="replace_uploader")
-        if replace_file is not None:
-            with st.spinner("Processing document…"):
-                try:
-                    result = api_client.upload_document(replace_file.read(), replace_file.name)
-                    st.session_state.active_document = result["document"]
-                    st.session_state.chat_history = []
-                    st.session_state.insights = None
-                    st.success(result["message"])
-                    st.rerun()
-                except APIError as e:
-                    st.error(str(e))
-
 else:
-    st.markdown(
-        """
-        <div class="upload-hint fade-in">
-          <div class="upload-hint-icon">
-            <svg viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
-              <path d="M12 12v9"></path><path d="m16 16-4-4-4 4"></path>
-            </svg>
-          </div>
-          <div>
-            <p class="upload-hint-title">Drag &amp; drop your PDF here</p>
-            <p class="upload-hint-sub">or click below to browse — text-based PDF documents only</p>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    uploaded_file = st.file_uploader(
-        "Drop your PDF here — supported: PDF documents",
-        type=["pdf"],
-        label_visibility="collapsed",
-        disabled=not backend_ok,
-    )
-    if uploaded_file is not None:
-        checklist_placeholder = st.empty()
-        steps_display = [
-            "Document uploaded", "Extracting text", "Creating document chunks",
-            "Generating embeddings", "Building vector index", "Ready for questions",
-        ]
-        checklist_html = "<div class='dm-card'>"
-        for s in steps_display:
-            checklist_html += f"<div class='proc-item'><span class='proc-check'>·</span> {s}…</div>"
-        checklist_html += "</div>"
-        checklist_placeholder.markdown(checklist_html, unsafe_allow_html=True)
-
-        try:
-            result = api_client.upload_document(uploaded_file.read(), uploaded_file.name)
-            done_html = "<div class='dm-card'>"
-            for step in result["document"]["steps"]:
-                detail = f"<span class='proc-detail'>{step['detail']}</span>" if step.get("detail") else ""
-                done_html += f"<div class='proc-item'><span class='proc-check'>✓</span> {step['name']} {detail}</div>"
-            done_html += "</div>"
-            checklist_placeholder.markdown(done_html, unsafe_allow_html=True)
-
-            st.session_state.active_document = result["document"]
-            st.session_state.chat_history = []
-            st.success(result["message"])
-            st.rerun()
-        except APIError as e:
-            checklist_placeholder.empty()
-            st.error(str(e))
+    st.markdown('<p class="dm-muted" style="font-size:0.92rem;">No documents uploaded yet.</p>', unsafe_allow_html=True)
 
 st.markdown('<hr class="hairline">', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
-# Ask your document
+# Ask your document(s)
 # ---------------------------------------------------------------------------
 st.markdown(
-    '<div class="section-head fade-in"><span class="eyebrow">Ask your document</span>'
+    '<div class="section-head fade-in"><span class="eyebrow">Ask your documents</span>'
     '<h3>Chat</h3></div>',
     unsafe_allow_html=True,
 )
 
-if not active_doc:
+has_selection = bool(st.session_state.selected_ids)
+
+if not docs:
     st.markdown('<p class="dm-muted" style="font-size:0.92rem;">Upload a document above to start asking questions.</p>', unsafe_allow_html=True)
+elif not has_selection:
+    st.markdown('<p class="dm-muted" style="font-size:0.92rem;">Select at least one document above to start asking questions.</p>', unsafe_allow_html=True)
 else:
     for turn in st.session_state.chat_history:
         with st.chat_message("user"):
             st.write(turn["question"])
         with st.chat_message("assistant"):
             badge_class = "badge-grounded" if turn["grounded"] else "badge-ungrounded"
-            badge_text = "Grounded in document" if turn["grounded"] else "No matching content found"
+            badge_text = "Grounded in document(s)" if turn["grounded"] else "No matching content found"
             st.markdown(
                 f"""<div class="answer-card">
                   <span class="grounded-badge {badge_class}">{badge_text}</span>
@@ -350,13 +357,19 @@ else:
                 </div>""",
                 unsafe_allow_html=True,
             )
+            if turn.get("documents_searched"):
+                searched = ", ".join(turn["documents_searched"])
+                st.markdown(
+                    f'<p class="dm-muted" style="font-size:0.78rem; margin-top:0.4rem;">Searched: {searched}</p>',
+                    unsafe_allow_html=True,
+                )
             if turn["sources"]:
                 with st.expander(f"View {len(turn['sources'])} source{'s' if len(turn['sources']) != 1 else ''}"):
                     for i, src in enumerate(turn["sources"], start=1):
                         st.markdown(
                             f"""<div class="source-card">
                               <div class="source-head">
-                                <span class="source-page">Source {i} · Page {src['page_number']}</span>
+                                <span class="source-page">Source {i} · {src['document_name']} · Page {src['page_number']}</span>
                                 <span class="source-sim">retrieval similarity {src['retrieval_similarity']:.2f}</span>
                               </div>
                               <div class="source-excerpt">{src['excerpt']}</div>
@@ -371,7 +384,7 @@ else:
                     )
 
     question = st.chat_input(
-        "Ask a question about the document…" if groq_configured else "Set GROQ_API_KEY on the backend to enable chat",
+        "Ask a question about the selected document(s)…" if groq_configured else "Set GROQ_API_KEY on the backend to enable chat",
         disabled=not groq_configured,
     )
     if question:
@@ -380,12 +393,13 @@ else:
         with st.chat_message("assistant"):
             with st.spinner("Retrieving relevant passages and generating an answer…"):
                 try:
-                    result = api_client.ask_question(question)
+                    result = api_client.ask_question(question, document_ids=st.session_state.selected_ids)
                     st.session_state.chat_history.append({
                         "question": question,
                         "answer": result["answer"],
                         "grounded": result["grounded"],
                         "sources": result["sources"],
+                        "documents_searched": result.get("documents_searched", []),
                     })
                     st.rerun()
                 except APIError as e:
@@ -445,7 +459,8 @@ st.markdown(
             accuracy — always verify against the cited source pages for anything important.</li>
         <li>DocMind currently requires text-based PDFs; scanned/image-only PDFs without
             an existing text layer are not supported.</li>
-        <li>One document is active at a time; uploading a new one replaces the current context.</li>
+        <li>Multiple documents can be uploaded and kept indexed at once; only the documents
+            you select are searched for a given question.</li>
       </ul>
     </div>
     """,
