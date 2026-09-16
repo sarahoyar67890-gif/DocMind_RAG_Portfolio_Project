@@ -5,6 +5,14 @@ Every tunable value (chunking, retrieval, model names, ports) lives here and
 is overridable via environment variables / .env. Nothing below is a magic
 number scattered through the codebase — services import `settings` from
 this module.
+
+NOTE ON "FUTURE" SETTINGS: this file defines the full configuration surface
+for DocMind 2.0 (hybrid retrieval, reranking, query transformation,
+self-correcting RAG, OCR), even though not every phase of that upgrade is
+implemented yet. Settings for not-yet-implemented features have defaults
+that keep current behavior unchanged (e.g. RERANKER_ENABLED does nothing
+until the reranker service exists) — this file just won't need to change
+again as each phase lands.
 """
 
 from pathlib import Path
@@ -32,8 +40,32 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 150
 
-    # --- Retrieval ---
+    # --- Retrieval (baseline / dense) ---
+    # retrieval_top_k stays as the default final chunk count used across the
+    # app (e.g. as the fallback for QueryRequest.top_k). The dense/bm25/hybrid
+    # knobs below are for the hybrid-retrieval pipeline (Phase 2).
     retrieval_top_k: int = 4
+    dense_top_k: int = 20
+    bm25_top_k: int = 20
+    hybrid_top_k: int = 20  # candidates kept after RRF fusion, before reranking
+    rrf_k: int = 60  # standard RRF damping constant
+
+    # --- Reranking (Phase 3) ---
+    reranker_enabled: bool = False
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    final_top_k: int = 5  # candidates kept after reranking, sent to the LLM
+
+    # --- Query transformation (Phase 4) ---
+    query_transformation_enabled: bool = False
+
+    # --- Self-correcting RAG (Phase 4) ---
+    max_rag_retries: int = 2
+
+    # --- Multi-document RAG (Phase 1 / Phase 5) ---
+    multi_document_enabled: bool = True
+
+    # --- OCR fallback for scanned PDFs (Phase 5) ---
+    ocr_enabled: bool = False
 
     # --- Vector store ---
     chroma_persist_dir: str = "/app/chroma_data"
