@@ -18,7 +18,7 @@ class DocumentStatus(BaseModel):
     num_pages: int
     num_chunks: int
     file_size_bytes: int
-    is_active: bool
+    is_selected: bool
     from_cache: bool
     steps: list[ProcessingStep]
 
@@ -28,17 +28,31 @@ class UploadResponse(BaseModel):
     message: str
 
 
-class ActiveDocumentResponse(BaseModel):
-    document: Optional[DocumentStatus] = None
+class DocumentListResponse(BaseModel):
+    documents: list[DocumentStatus]
+    selected_document_ids: list[str]
+
+
+class SelectDocumentsRequest(BaseModel):
+    document_ids: list[str] = Field(default_factory=list)
+
+
+class InsightsRequest(BaseModel):
+    document_id: str
 
 
 class QueryRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     top_k: Optional[int] = Field(default=None, ge=1, le=10)
+    # If omitted, the backend uses whatever documents are currently selected
+    # in the registry. If provided, this request's documents take priority
+    # for that single call without changing the persisted selection.
+    document_ids: Optional[list[str]] = None
 
 
 class SourceChunk(BaseModel):
     chunk_id: str
+    document_id: str
     document_name: str
     page_number: int
     excerpt: str
@@ -50,6 +64,7 @@ class QueryResponse(BaseModel):
     grounded: bool
     sources: list[SourceChunk]
     question: str
+    documents_searched: list[str] = Field(default_factory=list)
 
 
 class InsightsResponse(BaseModel):
@@ -65,4 +80,5 @@ class ErrorResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     groq_configured: bool
-    active_document: Optional[str] = None
+    documents_indexed: int
+    selected_documents: list[str] = Field(default_factory=list)
