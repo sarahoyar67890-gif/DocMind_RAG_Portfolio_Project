@@ -1,15 +1,23 @@
 """
 app/services/document_manager.py — Orchestrates PDF upload → extraction →
 chunking → embedding → indexing, plus a small persisted registry that
-tracks document metadata and which document is currently "active".
+tracks every processed document and which ones are currently "selected"
+(i.e. in scope for the next query).
+
+Multi-document model: uploading a document ADDS it to the registry and
+registers it in the vector store; it does not replace anything else that
+was already indexed. Selection is a separate, independent concept — a
+document can be indexed but not selected (excluded from search without
+losing its embeddings), and any number of documents can be selected at
+once. Only `remove_document` actually deletes a document's vectors.
 
 Caching: document_id is the SHA-256 hash of the uploaded file's bytes
 (truncated to 16 hex chars). If a document with that hash has already been
 processed (chunks already exist in the vector store), we skip re-extraction
-and re-embedding entirely and just mark it active — re-uploading the same
-PDF twice is close to free.
+and re-embedding entirely — re-uploading the same PDF twice is close to free.
 """
 
+import hashlib
 import json
 import logging
 import threading
@@ -24,8 +32,6 @@ from app.services.embeddings import embed_texts
 from app.services.vectorstore import VectorStore
 
 log = logging.getLogger(__name__)
-
-import hashlib
 
 
 def compute_document_id(file_bytes: bytes) -> str:
@@ -43,17 +49,34 @@ class DocumentManager:
         self._registry_path = Path(settings.registry_path)
         self._lock = threading.Lock()
         if not self._registry_path.exists():
-            self._write_registry({"documents": {}, "active_document_id": None})
+            self._write_registry({"documents": {}, "selected_document_ids": []})
 
     # ---------------- registry I/O ----------------
     def _read_registry(self) -> dict:
         with open(self._registry_path, "r") as f:
-            return json.load(f)
+            data = json.load(f)
+        # Defensive default for older registries written before this refactor.
+        data.setdefault("documents", {})
+        data.setdefault("selected_document_ids", [])
+        return data
 
     def _write_registry(self, data: dict) -> None:
         self._registry_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._registry_path, "w") as f:
             json.dump(data, f, indent=2)
+
+    def _status_from_entry(self, document_id: str, entry: dict, selected_ids: set[str],
+                            from_cache: bool, steps: list[ProcessingStep]) -> DocumentStatus:
+        return DocumentStatus(
+            document_id=document_id,
+            filename=entry["filename"],
+            num_pages=entry["num_pages"],
+            num_chunks=entry["num_chunks"],
+            file_size_bytes=entry["file_size_bytes"],
+            is_selected=document_id in selected_ids,
+            from_cache=from_cache,
+            steps=steps,
+        )
 
     # ---------------- core operations ----------------
     def process_upload(self, file_bytes: bytes, filename: str) -> tuple[DocumentStatus, list[ProcessingStep]]:
@@ -64,31 +87,25 @@ class DocumentManager:
 
         with self._lock:
             registry = self._read_registry()
-            cached = document_id in registry["documents"]
+            cached = document_id in registry["documents"] and self._store.document_exists(document_id)
 
-            if cached and self._store.document_exists(document_id):
-                log.info("Document '%s' (id=%s) already indexed — using cache", filename, document_id)
+        if cached:
+            log.info("Document '%s' (id=%s) already indexed — using cache", filename, document_id)
+            steps += [
+                ProcessingStep(name="Extracting text", status="done", detail="cached"),
+                ProcessingStep(name="Creating document chunks", status="done", detail="cached"),
+                ProcessingStep(name="Generating embeddings", status="done", detail="cached"),
+                ProcessingStep(name="Building vector index", status="done", detail="cached"),
+                ProcessingStep(name="Ready for questions", status="done"),
+            ]
+            with self._lock:
+                registry = self._read_registry()
                 entry = registry["documents"][document_id]
-                steps += [
-                    ProcessingStep(name="Extracting text", status="done", detail="cached"),
-                    ProcessingStep(name="Creating document chunks", status="done", detail="cached"),
-                    ProcessingStep(name="Generating embeddings", status="done", detail="cached"),
-                    ProcessingStep(name="Building vector index", status="done", detail="cached"),
-                    ProcessingStep(name="Ready for questions", status="done"),
-                ]
-                registry["active_document_id"] = document_id
+                if document_id not in registry["selected_document_ids"]:
+                    registry["selected_document_ids"].append(document_id)
                 self._write_registry(registry)
-                status = DocumentStatus(
-                    document_id=document_id,
-                    filename=entry["filename"],
-                    num_pages=entry["num_pages"],
-                    num_chunks=entry["num_chunks"],
-                    file_size_bytes=entry["file_size_bytes"],
-                    is_active=True,
-                    from_cache=True,
-                    steps=steps,
-                )
-                return status, steps
+                selected = set(registry["selected_document_ids"])
+            return self._status_from_entry(document_id, entry, selected, from_cache=True, steps=steps), steps
 
         # --- Not cached: run the real pipeline ---
         try:
@@ -116,58 +133,71 @@ class DocumentManager:
         steps.append(ProcessingStep(name="Building vector index", status="done"))
         steps.append(ProcessingStep(name="Ready for questions", status="done"))
 
+        entry = {
+            "filename": filename,
+            "num_pages": len(pages),
+            "num_chunks": len(chunks),
+            "file_size_bytes": len(file_bytes),
+            "processed_at": time.time(),
+        }
         with self._lock:
             registry = self._read_registry()
-            registry["documents"][document_id] = {
-                "filename": filename,
-                "num_pages": len(pages),
-                "num_chunks": len(chunks),
-                "file_size_bytes": len(file_bytes),
-                "processed_at": time.time(),
-            }
-            registry["active_document_id"] = document_id
+            registry["documents"][document_id] = entry
+            if document_id not in registry["selected_document_ids"]:
+                registry["selected_document_ids"].append(document_id)
             self._write_registry(registry)
+            selected = set(registry["selected_document_ids"])
 
-        status = DocumentStatus(
-            document_id=document_id,
-            filename=filename,
-            num_pages=len(pages),
-            num_chunks=len(chunks),
-            file_size_bytes=len(file_bytes),
-            is_active=True,
-            from_cache=False,
-            steps=steps,
-        )
-        return status, steps
+        return self._status_from_entry(document_id, entry, selected, from_cache=False, steps=steps), steps
 
-    def get_active_document(self) -> DocumentStatus | None:
+    def list_documents(self) -> list[DocumentStatus]:
         with self._lock:
             registry = self._read_registry()
-        active_id = registry.get("active_document_id")
-        if not active_id or active_id not in registry["documents"]:
+        selected = set(registry["selected_document_ids"])
+        docs = [
+            self._status_from_entry(doc_id, entry, selected, from_cache=True, steps=[])
+            for doc_id, entry in registry["documents"].items()
+        ]
+        docs.sort(key=lambda d: d.filename.lower())
+        return docs
+
+    def get_document(self, document_id: str) -> DocumentStatus | None:
+        with self._lock:
+            registry = self._read_registry()
+        entry = registry["documents"].get(document_id)
+        if not entry:
             return None
-        entry = registry["documents"][active_id]
-        return DocumentStatus(
-            document_id=active_id,
-            filename=entry["filename"],
-            num_pages=entry["num_pages"],
-            num_chunks=entry["num_chunks"],
-            file_size_bytes=entry["file_size_bytes"],
-            is_active=True,
-            from_cache=True,
-            steps=[],
-        )
+        selected = set(registry["selected_document_ids"])
+        return self._status_from_entry(document_id, entry, selected, from_cache=True, steps=[])
 
-    def clear_active_document(self) -> None:
-        """Clears the ACTIVE pointer and deletes that document's vectors.
-        Other previously-processed documents remain cached in the registry
-        (re-uploading them later is instant), but only one can be active."""
+    def get_selected_document_ids(self) -> list[str]:
         with self._lock:
             registry = self._read_registry()
-            active_id = registry.get("active_document_id")
-            if active_id:
-                self._store.delete_document(active_id)
-                registry["documents"].pop(active_id, None)
-                registry["active_document_id"] = None
+        # Filter out any stale ids that no longer exist in the registry.
+        return [doc_id for doc_id in registry["selected_document_ids"] if doc_id in registry["documents"]]
+
+    def set_selected_documents(self, document_ids: list[str]) -> list[DocumentStatus]:
+        """Replaces the selection wholesale with the given ids (unknown ids
+        are silently dropped rather than raising, since the frontend just
+        mirrors whatever set of checkboxes the user last touched)."""
+        with self._lock:
+            registry = self._read_registry()
+            valid_ids = [doc_id for doc_id in document_ids if doc_id in registry["documents"]]
+            registry["selected_document_ids"] = valid_ids
+            self._write_registry(registry)
+        return self.list_documents()
+
+    def remove_document(self, document_id: str) -> None:
+        """Deletes a document entirely: its vectors, its registry entry, and
+        drops it from the current selection. This is the only operation that
+        actually removes indexed data."""
+        with self._lock:
+            registry = self._read_registry()
+            if document_id in registry["documents"]:
+                self._store.delete_document(document_id)
+                registry["documents"].pop(document_id, None)
+                registry["selected_document_ids"] = [
+                    doc_id for doc_id in registry["selected_document_ids"] if doc_id != document_id
+                ]
                 self._write_registry(registry)
-                log.info("Cleared active document id=%s", active_id)
+                log.info("Removed document id=%s", document_id)
