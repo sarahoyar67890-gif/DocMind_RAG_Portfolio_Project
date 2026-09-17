@@ -39,6 +39,13 @@ class VectorStore:
             metadata={"hnsw:space": "cosine"},
         )
 
+    def _document_where(self, document_ids: list[str]) -> dict:
+        return (
+            {"document_id": document_ids[0]}
+            if len(document_ids) == 1
+            else {"document_id": {"$in": document_ids}}
+        )
+
     def document_exists(self, document_id: str) -> bool:
         """Used by the processing cache: if chunks for this document_id are
         already indexed, skip re-embedding entirely."""
@@ -80,11 +87,7 @@ class VectorStore:
             "n_results": top_k,
         }
         if document_ids:
-            query_kwargs["where"] = (
-                {"document_id": document_ids[0]}
-                if len(document_ids) == 1
-                else {"document_id": {"$in": document_ids}}
-            )
+            query_kwargs["where"] = self._document_where(document_ids)
 
         result = self._collection.query(**query_kwargs)
         if not result["ids"] or not result["ids"][0]:
@@ -104,6 +107,28 @@ class VectorStore:
                 similarity=round(similarity, 4),
             ))
         return retrieved
+
+    def get_all_chunks(self, document_ids: list[str]) -> list[RetrievedChunk]:
+        """Returns every indexed chunk belonging to the given documents, with
+        no similarity ranking applied. Used to build a BM25 index on the fly
+        for hybrid retrieval — BM25 needs the raw text of the whole scoped
+        corpus, not a pre-ranked top-k."""
+        if not document_ids:
+            return []
+        result = self._collection.get(where=self._document_where(document_ids))
+        if not result["ids"]:
+            return []
+        chunks = []
+        for cid, text, meta in zip(result["ids"], result["documents"], result["metadatas"]):
+            chunks.append(RetrievedChunk(
+                chunk_id=cid,
+                document_id=meta["document_id"],
+                document_name=meta["document_name"],
+                page_number=meta["page_number"],
+                text=text,
+                similarity=0.0,
+            ))
+        return chunks
 
     def get_sample_chunks(self, document_id: str, max_samples: int = 6) -> list[RetrievedChunk]:
         """Pulls a small, page-spread sample of chunks for a document —
