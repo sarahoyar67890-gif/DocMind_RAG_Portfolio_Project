@@ -36,6 +36,10 @@ if "insights" not in st.session_state:
     st.session_state.insights = {}  # document_id -> insights dict
 if "backend_status" not in st.session_state:
     st.session_state.backend_status = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0  # bumped after every upload attempt to force-reset the file_uploader widget
+if "upload_errors" not in st.session_state:
+    st.session_state.upload_errors = []
 
 
 def refresh_documents():
@@ -198,6 +202,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+if st.session_state.upload_errors:
+    for err in st.session_state.upload_errors:
+        st.error(err)
+    if st.button("Dismiss"):
+        st.session_state.upload_errors = []
+        st.rerun()
+
 st.markdown(
     """
     <div class="upload-hint fade-in">
@@ -221,7 +232,7 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True,
     label_visibility="collapsed",
     disabled=not backend_ok,
-    key="uploader",
+    key=f"uploader_{st.session_state.uploader_key}",
 )
 if uploaded_files:
     checklist_placeholder = st.empty()
@@ -231,17 +242,22 @@ if uploaded_files:
         unsafe_allow_html=True,
     )
     errors = []
+    success_count = 0
     for f in uploaded_files:
         try:
             api_client.upload_document(f.read(), f.name)
+            success_count += 1
         except APIError as e:
             errors.append(f"{f.name}: {e}")
     checklist_placeholder.empty()
-    if errors:
-        for err in errors:
-            st.error(err)
-    refresh_documents()
-    st.session_state.chat_history = []
+
+    st.session_state.upload_errors = errors
+    if success_count:
+        refresh_documents()
+        st.session_state.chat_history = []
+    # Always give the uploader a fresh key so it doesn't keep re-returning
+    # the same file(s) on every rerun — this is what was causing the loop.
+    st.session_state.uploader_key += 1
     st.rerun()
 
 st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
