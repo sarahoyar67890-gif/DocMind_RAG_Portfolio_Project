@@ -57,6 +57,11 @@ class SourceChunk(BaseModel):
     page_number: int
     excerpt: str
     retrieval_similarity: float
+    # Hybrid-retrieval metadata (Phase 2). None where not applicable, e.g.
+    # bm25_score is None for a chunk that only matched via dense search.
+    dense_similarity: Optional[float] = None
+    bm25_score: Optional[float] = None
+    rrf_score: Optional[float] = None
 
 
 class QueryResponse(BaseModel):
