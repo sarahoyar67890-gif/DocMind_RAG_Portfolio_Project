@@ -40,6 +40,8 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0  # bumped after every upload attempt to force-reset the file_uploader widget
 if "upload_errors" not in st.session_state:
     st.session_state.upload_errors = []
+if "doc_list_error" not in st.session_state:
+    st.session_state.doc_list_error = None
 
 
 def refresh_documents():
@@ -47,9 +49,11 @@ def refresh_documents():
         result = api_client.list_documents()
         st.session_state.documents = result.get("documents", [])
         st.session_state.selected_ids = result.get("selected_document_ids", [])
-    except APIError:
+        st.session_state.doc_list_error = None
+    except APIError as e:
         st.session_state.documents = []
         st.session_state.selected_ids = []
+        st.session_state.doc_list_error = str(e)
 
 
 def refresh_backend_status():
@@ -204,9 +208,15 @@ st.markdown(
 
 if st.session_state.upload_errors:
     for err in st.session_state.upload_errors:
-        st.error(err)
-    if st.button("Dismiss"):
+        st.error(f"Upload failed: {err}")
+    if st.button("Dismiss", key="dismiss_upload_errors"):
         st.session_state.upload_errors = []
+        st.rerun()
+
+if st.session_state.doc_list_error:
+    st.error(f"Couldn't load your document list: {st.session_state.doc_list_error}")
+    if st.button("Retry", key="retry_doc_list"):
+        refresh_documents()
         st.rerun()
 
 st.markdown(
@@ -256,7 +266,7 @@ if uploaded_files:
         refresh_documents()
         st.session_state.chat_history = []
     # Always give the uploader a fresh key so it doesn't keep re-returning
-    # the same file(s) on every rerun — this is what was causing the loop.
+    # the same file(s) on every rerun.
     st.session_state.uploader_key += 1
     st.rerun()
 
