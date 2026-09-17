@@ -1,7 +1,7 @@
 """
-app/services/rag_pipeline.py — Ties embeddings + vector search + LLM
-generation together, and builds the citation objects the frontend renders
-as source cards.
+app/services/rag_pipeline.py — Ties hybrid retrieval + LLM generation
+together, and builds the citation objects the frontend renders as source
+cards.
 
 Anti-hallucination is enforced in two places, deliberately:
   1. Prompting (see llm_service.SYSTEM_PROMPT) — instructs the model to
@@ -16,8 +16,8 @@ Anti-hallucination is enforced in two places, deliberately:
 import logging
 
 from app.schemas import SourceChunk, QueryResponse
-from app.services.embeddings import embed_query
 from app.services.llm_service import LLMService, LLMServiceError
+from app.services.retrieval import retrieve_hybrid
 from app.services.vectorstore import VectorStore
 
 log = logging.getLogger(__name__)
@@ -29,10 +29,23 @@ NO_CONTEXT_ANSWER = (
 
 
 class RAGPipeline:
-    def __init__(self, vector_store: VectorStore, llm_service: LLMService, embedding_model: str):
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        llm_service: LLMService,
+        embedding_model: str,
+        dense_top_k: int,
+        bm25_top_k: int,
+        hybrid_top_k: int,
+        rrf_k: int,
+    ):
         self._store = vector_store
         self._llm = llm_service
         self._embedding_model = embedding_model
+        self._dense_top_k = dense_top_k
+        self._bm25_top_k = bm25_top_k
+        self._hybrid_top_k = hybrid_top_k
+        self._rrf_k = rrf_k
 
     def answer(
         self,
@@ -41,12 +54,24 @@ class RAGPipeline:
         document_names: list[str],
         top_k: int,
     ) -> QueryResponse:
-        query_embedding = embed_query(question, self._embedding_model)
-        retrieved = self._store.query(query_embedding, document_ids=document_ids, top_k=top_k)
+        fused = retrieve_hybrid(
+            store=self._store,
+            embedding_model=self._embedding_model,
+            query=question,
+            document_ids=document_ids,
+            dense_top_k=self._dense_top_k,
+            bm25_top_k=self._bm25_top_k,
+            hybrid_top_k=self._hybrid_top_k,
+            rrf_k=self._rrf_k,
+        )
+        # Hybrid retrieval returns up to hybrid_top_k fused candidates; only
+        # the top `top_k` of those are actually sent to the LLM. (Phase 3
+        # replaces this straight truncation with cross-encoder reranking.)
+        retrieved = fused[:top_k]
 
         log.info(
-            "Retrieved %d chunks across %d document(s) for question (top_k=%d): %r",
-            len(retrieved), len(document_ids), top_k, question[:80],
+            "Hybrid retrieval: %d fused candidates, %d sent to LLM, across %d document(s) for question %r",
+            len(fused), len(retrieved), len(document_ids), question[:80],
         )
 
         if not retrieved:
@@ -72,7 +97,10 @@ class RAGPipeline:
                 document_name=chunk.document_name,
                 page_number=chunk.page_number,
                 excerpt=chunk.text,
-                retrieval_similarity=chunk.similarity,
+                retrieval_similarity=chunk.dense_similarity or 0.0,
+                dense_similarity=chunk.dense_similarity,
+                bm25_score=chunk.bm25_score,
+                rrf_score=round(chunk.rrf_score, 5),
             )
             for chunk in retrieved
         ]
