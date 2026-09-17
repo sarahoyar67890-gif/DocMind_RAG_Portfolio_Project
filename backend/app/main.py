@@ -50,7 +50,15 @@ llm_service = LLMService(
     temperature=settings.llm_temperature,
     max_tokens=settings.llm_max_tokens,
 )
-rag_pipeline = RAGPipeline(vector_store, llm_service, settings.embedding_model)
+rag_pipeline = RAGPipeline(
+    vector_store,
+    llm_service,
+    settings.embedding_model,
+    dense_top_k=settings.dense_top_k,
+    bm25_top_k=settings.bm25_top_k,
+    hybrid_top_k=settings.hybrid_top_k,
+    rrf_k=settings.rrf_k,
+)
 
 
 @app.get("/health", response_model=HealthResponse)
